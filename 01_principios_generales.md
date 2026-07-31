@@ -18,7 +18,7 @@
 | Mobile | Flutter | Apps nativas (wallets, apps de cliente) |
 | IaC | Terraform | Infraestructura como código (AWS y GCP) |
 | Contenedorización | Docker + Helm sobre Kubernetes | Empaquetado y despliegue |
-| Dominio financiero legacy | Java + Spring | Servicios específicos de dominio |
+| Dominio financiero | Java + Spring | Servicios de dominio financiero: legacy y también desarrollo nuevo cuando el core bancario del cliente lo impone |
 
 ### 1.2 Preferencia de stack para proyectos nuevos
 
@@ -30,7 +30,7 @@
 - **IaC:** Terraform.
 - **Contenedorización:** Docker + Helm sobre Kubernetes.
 
-**[REFERENCIA]** Ancient no descarta ningún stack. Se puede usar cualquier tecnología si el proyecto lo requiere (restricción del cliente, integración con sistemas existentes, dominio técnico específico). La desviación del stack preferido se documenta en el paquete de pase con justificación.
+**[REFERENCIA]** Ancient no descarta ningún stack. Se puede usar cualquier tecnología si el proyecto lo requiere (restricción del cliente, integración con sistemas existentes, dominio técnico específico). La desviación del stack preferido se documenta en el paquete de pase con justificación. La justificación la aprueba Arquitectura antes del arranque del proyecto, no después. Si el pase ya salió y a medio proyecto se cambia el stack, eso escala como desviación (ver Gobernanza Técnica, Sección 7).
 
 ---
 
@@ -68,6 +68,16 @@ src/
 └── main.ts
 ```
 
+Además de `src/`, en la raíz del repo:
+
+```
+test/                        # Tests e2e (Nest los genera aquí, no en src/)
+database/
+├── migrations/              # Migraciones versionadas
+└── seeds/                   # Datos semilla para dev/qa
+docs/                        # Diagramas y contratos no-REST (ver módulo 09)
+```
+
 ### 2.2 Backend — Monorepo NestJS (proyectos de plataforma)
 
 **[RECOMENDADO]** Para proyectos con múltiples servicios que comparten lógica (3+ servicios con librerías comunes):
@@ -75,15 +85,15 @@ src/
 ```
 apps/
 ├── transaction/
-├── payment_links/
+├── payment-links/
 ├── notification/
-└── web_backend/
+└── web-backend/
 libs/
-├── core_banking/
+├── core-banking/
 ├── oauth/
-├── cache_provider/
-├── common_core/
-└── email_notification/
+├── cache-provider/
+├── common-core/
+└── email-notification/
 ```
 
 ### 2.3 Frontend — Micro-frontends con single-spa
@@ -95,7 +105,7 @@ libs/
 - **Domain MFEs:** Uno por dominio funcional (login, dashboard, customers, operations, reports, etc.).
 - Cada MFE tiene su propio repo, pipeline, y deploy independiente.
 
-Angular se reserva para paneles administrativos simples donde single-spa sería over-engineering.
+Angular se reserva para paneles administrativos simples donde single-spa sería over-engineering. Un frontend de un solo dominio, sin necesidad de deploys independientes y con menos de 5 vistas, no requiere MFEs: se hace como SPA normal (Vue o Angular) y se documenta en el pase.
 
 ### 2.4 Patrones transversales NestJS
 
@@ -108,6 +118,7 @@ Angular se reserva para paneles administrativos simples donde single-spa sería 
 | Interceptors | Logging, transformación de respuestas |
 | Exception Filters (`@Catch`) | Manejo centralizado de errores |
 | `@nestjs/config` + Joi validation | Configuración de entorno tipada y validada |
+| Health checks (`@nestjs/terminus`) | Endpoints `/health` (liveness) y `/health/ready` (readiness) para K8s |
 
 ---
 
@@ -119,11 +130,13 @@ Angular se reserva para paneles administrativos simples donde single-spa sería 
 
 | Tecnología | Versión mínima | Versión recomendada | Nota |
 |------------|---------------|---------------------|------|
-| Node.js | 20 LTS | 22 LTS | `.nvmrc` obligatorio en todo repo |
+| Node.js | 22 LTS | 24 LTS | `.nvmrc` obligatorio en todo repo |
 | TypeScript | 5.0 | 5.8+ | |
-| NestJS | 10 | 11 | |
-| Angular | 17 | 19+ | |
+| NestJS | 10 | 11 | Nest 10 solo para repos existentes; proyecto nuevo arranca en 11 |
+| Angular | 19 | 19+ | |
 | Vue | 3.x | 3.x | |
+
+*Última revisión de esta tabla: [DD/MM/AAAA]. Se revisa en cada versión del Handbook.*
 
 ### 3.2 `.nvmrc` obligatorio
 
@@ -131,8 +144,10 @@ Angular se reserva para paneles administrativos simples donde single-spa sería 
 
 ```
 # .nvmrc
-20.18.0
+22.14.0
 ```
+
+**[ESTÁNDAR]** La versión del `.nvmrc` debe ser la misma que usa la imagen base del Dockerfile y la que se configura en el pipeline de CI. Si las tres no coinciden, es un hallazgo.
 
 ### 3.3 `engines` en `package.json`
 
@@ -141,11 +156,13 @@ Angular se reserva para paneles administrativos simples donde single-spa sería 
 ```json
 {
   "engines": {
-    "node": ">=20.0.0",
+    "node": ">=22.0.0",
     "npm": ">=10.0.0"
   }
 }
 ```
+
+Para que `engines` bloquee de verdad y no solo tire un warning, agregar también `.npmrc` con `engine-strict=true`.
 
 ---
 
@@ -153,7 +170,14 @@ Angular se reserva para paneles administrativos simples donde single-spa sería 
 
 **[ESTÁNDAR]** Todo servicio desplegable se contenedoriza con Docker.
 
-**[RECOMENDADO]** Para proyectos sobre Kubernetes: Helm charts para la gestión de configuración por ambiente (`helm/values-dev.yaml`, `values-qa.yaml`, `values.yaml`).
+**Reglas mínimas del Dockerfile:**
+
+- Multi-stage build (etapa de build separada de la etapa de runtime). La imagen final no lleva devDependencies ni código fuente TS.
+- La imagen corre con usuario no-root (`USER node` o equivalente).
+- Imagen base con tag fijo y versionado (`node:22.14.0-alpine`), nunca `latest`.
+- `.dockerignore` en el repo (mínimo `node_modules`, `.env`, `.git`, `coverage`, `dist`).
+
+**[RECOMENDADO]** Para proyectos sobre Kubernetes: Helm charts para la gestión de configuración por ambiente (`helm/values-dev.yaml`, `values-qa.yaml`, `values.yaml`). Definir siempre `resources.requests` y `resources.limits` en los values; un pod sin límites se puede comer el nodo.
 
 ---
 

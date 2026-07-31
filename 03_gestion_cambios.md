@@ -54,6 +54,8 @@ gitGraph
     merge hotfix/PE-999
 ```
 
+**[ESTÁNDAR]** Si hay una `release/*` abierta cuando sale un hotfix, el back-merge del hotfix va a `develop` y también a la `release/*` viva. Si no, el fix se pierde al liberar la siguiente versión y el bug reaparece en producción.
+
 ### 1.1 Mapeo branching → despliegue
 
 **[ESTÁNDAR]** El flujo de despliegue sigue las ramas:
@@ -61,8 +63,10 @@ gitGraph
 | Evento | Ambiente destino | Deploy |
 |--------|------------------|--------|
 | Merge a `develop` | `dev` | Automático |
-| Rama `release/*` | `qa` | Automático o manual (TL aprueba) |
+| Rama `release/*` | `qa` | Automático en cada push |
 | Merge a `main` (tag de versión) | `prod` | Manual con aprobación del TL |
+
+**[RECOMENDADO]** Ambientes efímeros de preview por PR para proyectos con frontend, de modo que PM y cliente puedan ver el cambio antes del merge.
 
 ---
 
@@ -89,6 +93,20 @@ gitGraph
 - Ramas `release/*` se nombran con la versión que preparan (`release/1.2.0`).
 - Descripción en kebab-case, máximo 5 palabras.
 - No ramas con nombre de persona ni ramas autogeneradas fuera de convención.
+- La rama se borra al mergear el PR (activar "delete branch on merge" en la config del repo). Solo `main` y `develop` sobreviven.
+
+**[RECOMENDADO]** Enforzar el naming con un hook `pre-push` de husky, no solo con buena voluntad:
+
+```sh
+# .husky/pre-push
+branch=$(git rev-parse --abbrev-ref HEAD)
+regex="^(feature|fix|release|hotfix|chore|refactor)\/[a-z0-9._-]+$"
+if ! echo "$branch" | grep -Eq "$regex"; then
+  echo "Nombre de rama inválido: $branch"
+  echo "Formato esperado: <tipo>/<TICKET-ID>-<descripcion-breve>"
+  exit 1
+fi
+```
 
 ---
 
@@ -134,6 +152,19 @@ feat(dashboard)!: redesign KPI layout
 BREAKING CHANGE: dashboard API response format changed
 ```
 
+**[ESTÁNDAR]** El ID del ticket va en el footer del commit, con `Refs: PE-123`. Así el mensaje se mantiene legible y la trazabilidad ticket a código no depende únicamente del nombre de la rama, que se borra al mergear.
+
+```
+fix(payments): resolve timeout on concurrent transactions
+
+El pool de conexiones se agotaba cuando entraban más de 50 pagos
+concurrentes porque la llamada al core no tenía timeout.
+
+Refs: PE-456
+```
+
+**[ESTÁNDAR]** Los mensajes de commit se escriben en inglés. El cuerpo puede ir en español si el detalle lo amerita.
+
 ### 3.2 Enforcement automático
 
 **[ESTÁNDAR]** Conventional Commits se enforcea con herramientas, no con buena voluntad.
@@ -161,9 +192,11 @@ module.exports = { extends: ['@commitlint/config-conventional'] };
 npx --no -- commitlint --edit "$1"
 ```
 
+**[ESTÁNDAR]** Como husky solo corre en local y se puede saltar con `--no-verify`, el pipeline valida también el título del PR contra Conventional Commits. Con squash merge, el título del PR es el commit que queda en la historia.
+
 ### 3.3 Semantic Release
 
-**[RECOMENDADO]** Para repos que generan artefactos versionados (APIs, librerías, MFEs), usar `semantic-release` para automatizar versionado y changelog basado en los commits, disparado al integrar en `main`.
+**[RECOMENDADO]** Para repos que generan artefactos versionados (APIs, librerías, MFEs), usar `semantic-release` para generar el CHANGELOG y las release notes a partir de los commits. El número de versión y el tag los define el flujo de release (Sección 5), no la herramienta.
 
 ```json
 // .releaserc.json
@@ -172,9 +205,7 @@ npx --no -- commitlint --edit "$1"
   "plugins": [
     "@semantic-release/commit-analyzer",
     "@semantic-release/release-notes-generator",
-    "@semantic-release/changelog",
-    "@semantic-release/npm",
-    "@semantic-release/git"
+    "@semantic-release/changelog"
   ]
 }
 ```
@@ -196,6 +227,8 @@ npx --no -- commitlint --edit "$1"
 
 **[ESTÁNDAR]** Toda rama `release/*` y `hotfix/*` que se integra en `main` se etiqueta con la versión correspondiente (`vX.Y.Z`). No hay commit en `main` sin su tag de versión.
 
+**[ESTÁNDAR]** El back-merge (`release/*` y `hotfix/*` hacia `develop`) se hace dentro de las 24 horas siguientes al merge a `main`, y es responsabilidad del TL que liberó. Un back-merge pendiente bloquea el corte del siguiente release.
+
 ---
 
 ## 5. Releases y Versionado
@@ -211,6 +244,14 @@ npx --no -- commitlint --edit "$1"
 2. En la rama de release solo entran correcciones de estabilización (no features nuevos). Se despliega a `qa`.
 3. Al aprobarse, `release/X.Y.Z` se integra en `main` con tag `vX.Y.Z` y se despliega a `prod`.
 4. Se hace back-merge de `release/X.Y.Z` a `develop`.
+5. Se borra la rama `release/X.Y.Z`. El tag `vX.Y.Z` en `main` es el registro permanente, la rama ya no.
+
+**[ESTÁNDAR] Rollback.** Todo release documenta cómo se revierte antes de salir a producción:
+
+- **Aplicación:** rollback a la versión anterior del artefacto (`helm rollback` o redeploy del tag previo). Nunca `git revert` sobre `main` en caliente.
+- **Base de datos:** si el release incluye migraciones, la migración es retrocompatible con la versión anterior de la app (agregar columna sí; borrar o renombrar columna en el mismo release, no) o el paquete de release incluye su script de reversa probado en QA.
+
+**[RECOMENDADO]** Los cambios destructivos de esquema van un release después del cambio de código: el release N agrega la columna nueva y escribe en las dos, el release N+1 borra la vieja.
 
 ---
 
@@ -224,6 +265,14 @@ npx --no -- commitlint --edit "$1"
 | `develop` | Cualquier dev del pod (vía PR) | PR aprobado por al menos 1 reviewer + checks pasando |
 | `release/*`, `hotfix/*` | TL | PR aprobado |
 
+**Configuración obligatoria de las reglas de protección (GitHub/GitLab):**
+
+- Push directo bloqueado en `main` y `develop`, incluyendo administradores.
+- Force push y borrado de rama bloqueados en `main` y `develop`.
+- Aprobaciones invalidadas al subir commits nuevos (dismiss stale reviews).
+- La rama debe estar actualizada con el destino antes de mergear.
+- Historial lineal en `develop`, consistente con squash merge.
+
 **[ESTÁNDAR]** Nadie hace push directo a `main` ni a `develop`. Todo cambio entra por PR. Sin excepciones, incluyendo hotfixes (que van por PR fast-tracked, no por push directo).
 
 ---
@@ -236,9 +285,32 @@ npx --no -- commitlint --edit "$1"
 
 ¿Por qué? Los PRs de 1,000+ líneas no se revisan de verdad — se aprueban por fatiga. Los PRs de 100-300 líneas se revisan en 15-20 minutos con atención real.
 
+**[RECOMENDADO]** Para dividir un feature grande, encadenar PRs contra una rama base del propio feature (`feature/PE-123-base`) en lugar de contra `develop`, y mergear por partes sin romper la rama de integración.
+
 ### 7.2 Un PR = un propósito
 
 **[RECOMENDADO]** Cada PR resuelve una cosa: un feature, un bug, un refactor, una actualización de dependencias. Los PRs que mezclan un feature con un refactor y una actualización de config son difíciles de revisar y de revertir.
+
+### 7.3 Template de PR
+
+**[ESTÁNDAR]** Todo repo incluye `.github/PULL_REQUEST_TEMPLATE.md` (o el equivalente de GitLab) con el mínimo:
+
+```markdown
+## Qué hace este PR
+[Descripción breve del cambio]
+
+## Ticket
+Refs: PE-XXX
+
+## Cómo se probó
+[Pasos para reproducir / evidencia de las pruebas]
+
+## Checklist
+- [ ] Tests agregados o actualizados
+- [ ] No introduce secrets ni datos sensibles
+- [ ] Documentación actualizada (README / Swagger / .env.example) si aplica
+- [ ] Incluye migraciones (si sí, son retrocompatibles?)
+```
 
 ---
 
